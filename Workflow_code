@@ -1,0 +1,417 @@
+// =============================
+// LOAD DATA
+// =============================
+
+var glg_fc = ee.FeatureCollection('users/mbokshi45/geo8bg');
+var demCol = ee.ImageCollection("COPERNICUS/DEM/GLO30");
+var gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select('occurrence');
+var l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA");
+
+var proj = ee.Projection('EPSG:4326').atScale(30);
+
+// =============================
+// UI PANEL
+// =============================
+
+var panel = ui.Panel({style:{backgroundColor:'#eef5ff',width:'320px'}});
+ui.root.insert(0,panel);
+
+// =============================
+// TITLE + ABOUT BUTTON
+// =============================
+
+// title
+var title = ui.Label(
+  'Archaeological Landscape Suitability Modeling',
+  {fontWeight:'bold', fontSize:'16px', stretch:'horizontal'}
+);
+
+// about button
+var aboutBtn = ui.Button({
+  label:'about',
+  style:{
+    margin:'0 0 0 6px',
+    padding:'4px',
+    color:'#5a5a5a'   // blue text
+  }
+});
+
+// container (puts button to the right of title)
+var titleRow = ui.Panel({
+  widgets:[title, aboutBtn],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style:{stretch:'horizontal'}
+});
+
+panel.add(titleRow);
+
+// =============================
+// ABOUT PANEL (hidden by default)
+// =============================
+
+var aboutPanel = ui.Panel({
+  style:{
+    shown:false,
+    padding:'2px',
+    backgroundColor:'#eef5ff',
+    margin:'2px 0'
+  }
+});
+
+// about text
+var aboutText = ui.Label(
+  'This tool evaluates archaeological landscape\n' +
+  'suitability using Elevation from Copernicus GLO-30m\n' +
+  'DEM, JRC Global Surface Water Occurrence, Landsat 8 Shortwave Infrared (SWIR Band 6),\n' +
+  'Surface Geological Units by Survey of Bangladesh & USGS. It supports Weighted Linear Combination (WLC) and Logistic Regression (LR) approaches\n' +
+  'spatial prediction. This tool was developed by Milon Bokshi as part of academic research in April 2026.\n' +
+  'See documentation ...link.',
+  
+  {
+    fontSize:'12px',
+    whiteSpace:'pre-wrap',   // 🔥 required for multi-line
+    stretch:'horizontal'
+  }
+);
+
+// close button
+var closeBtn = ui.Button({
+  label:'close',
+  style:{
+    margin:'6px 0 0 0',
+    color:'#d32f2f'   // red text
+  }
+});
+
+// assemble panel
+aboutPanel.add(aboutText);
+aboutPanel.add(closeBtn);
+
+panel.add(aboutPanel);
+
+// =============================
+// TOGGLE LOGIC
+// =============================
+
+// open / toggle
+aboutBtn.onClick(function(){
+  var isShown = aboutPanel.style().get('shown');
+  aboutPanel.style().set('shown', !isShown);
+});
+
+// close button
+closeBtn.onClick(function(){
+  aboutPanel.style().set('shown', false);
+});
+
+var latBox = ui.Textbox({placeholder:'Latitude'});
+var lonBox = ui.Textbox({placeholder:'Longitude'});
+panel.add(latBox);
+panel.add(lonBox);
+
+var modelSelect = ui.Select({items:['WLC','LR'], value:'WLC'});
+panel.add(modelSelect);
+
+var runBtn = ui.Button('Run Model');
+panel.add(runBtn);
+
+// 🔥 FIXED PANELS
+var modelLegendPanel = ui.Panel();
+panel.add(modelLegendPanel);
+
+var otherLegendPanel = ui.Panel();  
+panel.add(otherLegendPanel);
+
+// =============================
+// LEGENDS
+// =============================
+
+function modelLegend(min, max){
+
+  modelLegendPanel.clear();
+
+  modelLegendPanel.add(ui.Label('Landscape Suitability', {fontWeight:'bold'}));
+
+  var gradient = ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: {
+      bbox: [0,0,1,0.1],
+      dimensions: '200x20',
+      format: 'png',
+      min: 0,
+      max: 1,
+      palette: ['blue','yellow','red']
+    },
+    style: {stretch: 'horizontal', margin: '8px 0'}
+  });
+
+  var labels = ui.Panel({
+    layout: ui.Panel.Layout.flow('horizontal'),
+    style: {stretch: 'horizontal'}
+  });
+
+  labels.add(ui.Label(min.toFixed(2)));
+  labels.add(ui.Label({
+    value: max.toFixed(2),
+    style: {textAlign:'right', stretch:'horizontal'}
+  }));
+
+  modelLegendPanel.add(gradient);
+  modelLegendPanel.add(labels);
+}
+
+function rangeLegend(title, min, max, unit){
+  otherLegendPanel.add(ui.Label(title, {fontWeight:'bold'}));
+  otherLegendPanel.add(ui.Label(min.toFixed(2) + ' – ' + max.toFixed(2) + ' ' + unit));
+}
+
+// =============================
+// GLG PROCESSING
+// =============================
+
+var FIELD = 'GLG';
+
+var weightDict = ee.Dictionary({
+  'H2O':0,'lake':0,'csd':1,'dsw':2,'dm':3,'dt':4,'de':5,'dsl':6,'dsd':7,
+  'ppc':8,'asd':9,'asl':10,'asc':11,'ac':12,'ava':13,
+  'afy':14,'afo':15,'rb':16,'rm':17,
+  'Qsm':18,'QTdd':19,'QTdi':20,'QTdt':21,'QTg':22,
+  'Tt':23,'Tbb':24,'Tb':25,'Tba':26,'Tj':27
+});
+
+var glgRaster = glg_fc.map(function(f){
+  return f.set('val', ee.Number(weightDict.get(f.get(FIELD),0)));
+}).reduceToImage({
+  properties:['val'],
+  reducer:ee.Reducer.first()
+}).rename('GLG').reproject(proj);
+
+var glgClass = glgRaster.expression(
+  "(g<=1)?1:(g<=7)?2:(g==8)?3:(g<=13)?4:(g<=15)?5:(g<=17)?6:(g<=21)?7:(g<=23)?8:(g<=26)?9:10",
+  {g: glgRaster}
+);
+
+// =============================
+// BASE LAYERS
+// =============================
+
+var dem = demCol.select('DEM').mosaic().reproject(proj);
+var water = gsw.reproject(proj);
+
+function getSWIR(buffer){
+  return l8
+    .filterBounds(buffer)
+    .filterDate('2024-11-01','2025-03-31')
+    .filter(ee.Filter.lt('CLOUD_COVER',20))
+    .median()
+    .select('B6')
+    .clip(buffer);
+}
+
+// =============================
+// CLASS FUNCTION
+// =============================
+
+function classify10(image, band, region, invert){
+
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+
+  var min = ee.Number(stats.get(band + '_min'));
+  var max = ee.Number(stats.get(band + '_max'));
+
+  var step = max.subtract(min).divide(10);
+  step = ee.Number(ee.Algorithms.If(step.eq(0), 1, step));
+
+  var cls = image.subtract(min).divide(step).floor().add(1).clamp(1,10);
+
+  if(invert){
+    cls = ee.Image(11).subtract(cls);
+  }
+
+  return cls.unmask(1);
+}
+
+// =============================
+// INPUT STACK
+// =============================
+
+function getInputs(buffer){
+
+  var swir = getSWIR(buffer);
+
+  return {
+    dem: classify10(dem.clip(buffer), 'DEM', buffer, false),
+    water: classify10(water.clip(buffer), 'occurrence', buffer, true),
+    swir: classify10(swir, 'B6', buffer, false),
+    glg: glgClass.clip(buffer).unmask(1),
+    raw: {
+      dem: dem.clip(buffer),
+      water: water.clip(buffer),
+      swir: swir
+    }
+  };
+}
+
+// =============================
+// MODELS
+// =============================
+
+function runWLC(i){
+  return i.dem.multiply(0.35)
+    .add(i.water.multiply(0.2))
+    .add(i.swir.multiply(0.15))
+    .add(i.glg.multiply(0.3))
+    .multiply(10)
+    .rename('WLC');
+}
+
+function runLR(i){
+
+  var d = i.dem.subtract(5).divide(5);
+  var w = i.water.subtract(5).divide(5);
+  var s = i.swir.subtract(5).divide(5);
+  var g = i.glg.subtract(5).divide(5);
+
+  var linear = d.multiply(1.2)
+    .add(w.multiply(0.8))
+    .add(s.multiply(0.6))
+    .add(g.multiply(1.0));
+
+  return ee.Image(1)
+    .divide(ee.Image(1).add(linear.multiply(-1).exp()))
+    .multiply(100)
+    .rename('LR');
+}
+
+// =============================
+// RUN
+// =============================
+
+runBtn.onClick(function(){
+
+  Map.layers().reset();
+
+  modelLegendPanel.clear();
+  otherLegendPanel.clear();
+
+  var lat = ee.Number.parse(latBox.getValue());
+  var lon = ee.Number.parse(lonBox.getValue());
+
+  var buffer = ee.Geometry.Point([lon, lat]).buffer(20000);
+
+  Map.centerObject(buffer,10);
+
+  var inputs = getInputs(buffer);
+
+  Map.addLayer(inputs.dem, {min:1,max:10,palette:['white','red']}, 'DEM');
+  Map.addLayer(inputs.water, {min:1,max:10,palette:['white','blue']}, 'Water');
+  Map.addLayer(inputs.swir, {min:1,max:10,palette:['white','green']}, 'SWIR');
+  Map.addLayer(inputs.glg, {min:1,max:10,palette:['white','purple']}, 'GLG');
+
+  var result = (modelSelect.getValue() === 'WLC')
+    ? runWLC(inputs)
+    : runLR(inputs);
+
+  result.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: buffer,
+    scale: 30,
+    maxPixels: 1e13
+  }).evaluate(function(m){
+
+    var min = m.WLC_min || m.LR_min;
+    var max = m.WLC_max || m.LR_max;
+
+    modelLegend(min, max);
+
+    Map.addLayer(result.clip(buffer), {
+      min:min,
+      max:max,
+      palette:['blue','yellow','red']
+    }, 'Model');
+  });
+
+  inputs.raw.dem.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: buffer,
+    scale: 30,
+    maxPixels: 1e13
+  }).evaluate(function(s){
+    rangeLegend('Elevation (m)', s.DEM_min, s.DEM_max, 'm');
+  });
+
+  inputs.raw.water.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: buffer,
+    scale: 30,
+    maxPixels: 1e13
+  }).evaluate(function(s){
+    rangeLegend('Water Occurrence (%)', s.occurrence_min, s.occurrence_max, '%');
+  });
+
+  inputs.raw.swir.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: buffer,
+    scale: 30,
+    maxPixels: 1e13
+  }).evaluate(function(s){
+    rangeLegend('Shortwave Infrared SWIR', s.B6_min, s.B6_max, '');
+  });
+
+  // ✅ GLG legend with custom names
+  glg_fc
+    .filterBounds(buffer)
+    .aggregate_array(FIELD)
+    .distinct()
+    .evaluate(function(names){
+
+      if (!names || names.length === 0) return;
+
+      otherLegendPanel.add(ui.Label('Surface Geological Unit', {fontWeight:'bold'}));
+
+      var glgNames = {
+        'H2O':'Water',
+        'csd':'Beach and dune sand',
+        'dsw':'Mangrove swamp deposit',
+        'dm':'Tidal mud',
+        'dt':'Tidal deltaic deposits',
+        'de':'Estuarine deposits',
+        'dsl':'Deltaic silt',
+        'dsd':'Deltaic sand',
+        'ppc':'Marsh clay and peat',
+        'asd':'Alluvial sand',
+        'asl':'Alluvial silt',
+        'asc':'Alluvial silt and clay',
+        'ac':'Chandina alluvium',
+        'ava':'Valley alluvium and colluvium',
+        'afy':'Young gravelly sand',
+        'afo':'Old gravelly sand',
+        'rb':'Barind clay residuum',
+        'rm':'Madhupur clay residuum',
+        'Qsm':'St. Martin limestone (Pleistocene)',
+        'QTdd':'Dihing and Dupi Tila Formation Undivided',
+        'QTdi':'Dihing Formation (Pleistocene and Pliocene)',
+        'QTdt':'Dupi Tila Formation (Pleistocene and Pliocene)',
+        'QTg':'Girujan Clay (Pleistocene and Neogene)',
+        'Tt':'Tipam Sandstone (Neogene)',
+        'Tbb':'Boka Bil Formation (Neogene)',
+        'Tb':'Bhuban Formation (Miocene)',
+        'Tba':'Barail Formation (Oligocene)',
+        'Tj':'Jaintia Group Formation (Late Eocene)'
+      };
+
+      names.sort().forEach(function(n){
+        var label = glgNames[n] || n;
+        otherLegendPanel.add(ui.Label(n + ' — ' + label));
+      });
+
+  });
+
+});
+
+Map.setCenter(90.4,23.7,7);
